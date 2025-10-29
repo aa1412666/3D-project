@@ -14,7 +14,7 @@ import ModelViewer from './components/ModelViewer.vue'
       :hemiIntensity="0.2"
       :dirPosition="[2, 6, 3]"
       :enableShadows="true"
-      :enableGround="true"
+      :enableGround="false"
     />
     <p class="desc">
       将 <code>UtensilsJar001.glb</code> 放到 <code>public/models/</code> 目录即可显示；
