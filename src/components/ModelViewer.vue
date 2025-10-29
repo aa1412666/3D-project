@@ -3,18 +3,46 @@ import { onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js'
 
 // 组件对外可配置的属性
 // - src: GLB 模型路径，默认从 public/models 目录加载
 // - background: 背景，传 null 表示透明（alpha 渲染），也可传色值字符串，例如 '#20232a'
+// - hemiSkyColor/hemiGroundColor/hemiIntensity: 半球光颜色与强度
+// - dirIntensity/dirPosition: 方向光强度与位置
+// - envMap: HDR 环境贴图路径（如 /env/studio.hdr），用于 IBL（基于图像的光照）
+// - envMapIntensity: 环境贴图对材质的影响强度（MeshStandardMaterial.envMapIntensity）
+// - useEnvAsBackground: 是否用 HDR 作为背景
+// - enableShadows: 是否启用阴影
+// - enableGround: 是否显示地面
 type Props = {
   src?: string
   background?: string | null
+  hemiSkyColor?: string
+  hemiGroundColor?: string
+  hemiIntensity?: number
+  dirIntensity?: number
+  dirPosition?: [number, number, number]
+  envMap?: string | null
+  envMapIntensity?: number
+  useEnvAsBackground?: boolean
+  enableShadows?: boolean
+  enableGround?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   src: '/models/UtensilsJar001.glb',
   background: null,
+  hemiSkyColor: '#ffffff',
+  hemiGroundColor: '#444444',
+  hemiIntensity: 1.0,
+  dirIntensity: 1.2,
+  dirPosition: () => [5, 10, 7] as [number, number, number],
+  envMap: null,
+  envMapIntensity: 1.0,
+  useEnvAsBackground: false,
+  enableShadows: true,
+  enableGround: true,
 })
 
 // 用于挂载 WebGL Canvas 的容器引用
@@ -83,19 +111,31 @@ onMounted(() => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(width, height)
   renderer.outputColorSpace = THREE.SRGBColorSpace
-  renderer.shadowMap.enabled = true
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1.0
+  renderer.shadowMap.enabled = !!props.enableShadows
   container.value.appendChild(renderer.domElement)
 
   // Lights
   // 半球光提供环境光感；方向光作为主光源并开启阴影
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0)
+  const hemi = new THREE.HemisphereLight(
+    new THREE.Color(props.hemiSkyColor),
+    new THREE.Color(props.hemiGroundColor),
+    props.hemiIntensity
+  )
   hemi.position.set(0, 1, 0)
   scene.add(hemi)
 
-  const dirLight = new THREE.DirectionalLight(0xffffff, 1.2)
-  dirLight.position.set(5, 10, 7)
-  dirLight.castShadow = true
+  const dirLight = new THREE.DirectionalLight(0xffffff, props.dirIntensity)
+  dirLight.position.set(...props.dirPosition)
+  dirLight.castShadow = !!props.enableShadows
   scene.add(dirLight)
+
+  // Rim Light（可选补光）：低强度方向光从反方向打亮模型轮廓
+  const rimLight = new THREE.DirectionalLight(0xffffff, Math.max(props.dirIntensity * 0.3, 0))
+  rimLight.position.set(-props.dirPosition[0], props.dirPosition[1] * 0.8, -props.dirPosition[2])
+  rimLight.castShadow = false
+  scene.add(rimLight)
 
   // Controls
   // 轨道控制器：支持拖拽旋转、滚轮缩放、惯性（阻尼）
@@ -104,14 +144,36 @@ onMounted(() => {
 
   // Ground (optional subtle)
   // 一个简易的圆形地面用于接收阴影，增加空间感
-  const ground = new THREE.Mesh(
-    new THREE.CircleGeometry(10, 64),
-    new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 1, metalness: 0 })
-  )
-  ground.rotation.x = -Math.PI / 2
-  ground.position.y = -0.001
-  ground.receiveShadow = true
-  scene.add(ground)
+  if (props.enableGround) {
+    const ground = new THREE.Mesh(
+      new THREE.CircleGeometry(10, 64),
+      new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 1, metalness: 0 })
+    )
+    ground.rotation.x = -Math.PI / 2
+    ground.position.y = -0.001
+    ground.receiveShadow = !!props.enableShadows
+    scene.add(ground)
+  }
+
+  // Environment Map（可选）：加载 HDR 环境贴图用于 IBL
+  if (props.envMap) {
+    const rgbeLoader = new RGBELoader()
+    rgbeLoader.load(
+      props.envMap,
+      (texture) => {
+        texture.mapping = THREE.EquirectangularReflectionMapping
+        scene!.environment = texture
+        // 若未设置特定背景颜色，且允许使用环境贴图作为背景
+        if (props.useEnvAsBackground && props.background === null) {
+          scene!.background = texture
+        }
+      },
+      undefined,
+      (err) => {
+        console.warn('Failed to load HDR env map:', err)
+      }
+    )
+  }
 
   // Load model
   // 使用 GLTFLoader 异步加载 GLB 模型，加载完成后遍历网格开启阴影并加入场景
@@ -123,8 +185,15 @@ onMounted(() => {
       root.traverse((obj: THREE.Object3D) => {
         if ((obj as THREE.Mesh).isMesh) {
           const m = obj as THREE.Mesh
-          m.castShadow = true
-          m.receiveShadow = true
+          m.castShadow = !!props.enableShadows
+          m.receiveShadow = !!props.enableShadows
+          type MaterialWithEnv = THREE.Material & { envMapIntensity?: number; needsUpdate?: boolean }
+          const mat = m.material as MaterialWithEnv
+          // 统一增强 PBR 材质的环境贴图强度（若使用 HDR 环境光）
+          if (typeof mat.envMapIntensity === 'number' && typeof props.envMapIntensity === 'number') {
+            mat.envMapIntensity = props.envMapIntensity
+            mat.needsUpdate = true
+          }
         }
       })
       scene!.add(root)
